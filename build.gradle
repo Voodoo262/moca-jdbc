@@ -1,0 +1,96 @@
+plugins {
+    id 'java-library'
+    id 'jvm-test-suite'
+    id 'jacoco'
+}
+
+group = 'io.github.voodoo262'
+// Overridable so a release tag drives the version rather than a literal that goes
+// stale on the first patch. See .github/workflows/release.yml.
+version = project.findProperty('projectVersion') ?: '1.0.0'
+
+description = 'JDBC driver for the MOCA command protocol'
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+// No runtime dependencies, by design. The driver must be a single self-contained
+// jar that a user can drop into DBeaver's Driver Manager. Everything it needs
+// (HTTP client, XML parsing, logging) comes from the JDK.
+dependencies {
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Deliberately conservative: this artifact gets embedded in other people's
+    // applications (DBeaver, DataGrip, JMeter, Spring), so the floor is low.
+    // `release` rather than a toolchain, so any newer JDK can build it without
+    // provisioning a second one.
+    options.release = 17
+    // Load-bearing, not boilerplate. Several sources carry UTF-8 punctuation,
+    // including a user-visible exception message; JEP 400 (UTF-8 by default)
+    // only landed in Java 18, so at a 17 release level javac would otherwise
+    // read them in the platform charset and compile them to mojibake.
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:all' << '-Werror'
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    // -missing: the JDBC interfaces this implements are documented upstream, and
+    // requiring a javadoc block on all ~700 delegating overrides buys nothing.
+    // Everything else, including unresolvable @link/@see targets, is an error.
+    options.addStringOption('Xdoclint:all,-missing', '-quiet')
+    // The protocol package is an implementation detail; see its package-info.
+    exclude 'io/github/voodoo262/jdbc/moca/protocol/**'
+}
+
+tasks.withType(Jar).configureEach {
+    // Byte-stable artifacts: the jar is published as a release asset, so two
+    // builds of the same commit should agree.
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+jar {
+    manifest {
+        attributes(
+            'Implementation-Title': 'MOCA JDBC Driver',
+            // MocaDriver reads this back for DatabaseMetaData.getDriverVersion().
+            'Implementation-Version': project.version,
+            'Automatic-Module-Name': 'io.github.voodoo262.jdbc.moca'
+        )
+    }
+}
+
+testing {
+    suites {
+        test {
+            useJUnitJupiter('5.10.2')
+        }
+    }
+}
+
+tasks.withType(Test).configureEach {
+    systemProperty 'file.encoding', 'UTF-8'
+}
+
+// Read by the release workflow to assert the tag matches the built version.
+tasks.register('printVersion') {
+    doLast { println project.version }
+}
+
+test {
+    finalizedBy jacocoTestReport
+}
+jacocoTestReport {
+    reports {
+        xml.required = true
+        html.required = false
+    }
+}
