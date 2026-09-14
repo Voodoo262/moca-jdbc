@@ -5,8 +5,8 @@ plugins {
 }
 
 group = 'io.github.voodoo262'
-// Overridable so a release tag drives the version rather than a literal that goes
-// stale on the first patch. See .github/workflows/release.yml.
+// Releases take their version from the tag (see .github/workflows/release.yml), so
+// this literal is only the fallback for local builds and never needs bumping.
 version = project.findProperty('projectVersion') ?: '1.0.0'
 
 description = 'JDBC driver for the MOCA command protocol'
@@ -78,11 +78,6 @@ testing {
 
 tasks.withType(Test).configureEach {
     systemProperty 'file.encoding', 'UTF-8'
-}
-
-// Read by the release workflow to assert the tag matches the built version.
-tasks.register('printVersion') {
-    doLast { println project.version }
 }
 
 test {
