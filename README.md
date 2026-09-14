@@ -118,10 +118,11 @@ that is what a JDBC caller is written against.
 
 - **Columns are 1-based**, as JDBC mandates and every tool assumes. MOCA's own wire format
   is positional and 0-based; the conversion happens in exactly one place.
-- **"No rows" is not an error.** MOCA reports a query that matched nothing as status `510`.
-  In JDBC that is an *empty `ResultSet`*, not an exception, so the driver returns one — still
-  carrying the column list MOCA sends with it, so the empty result stays properly typed.
-  Otherwise every empty table would pop an error dialog.
+- **"No rows" is not an error.** MOCA reports a query that matched nothing as status `510`,
+  or as `-1403` from its database layer. In JDBC that is an *empty `ResultSet`* (or an update
+  count of zero), not an exception, so the driver returns one — still carrying the column list
+  MOCA sends with it, so the empty result stays properly typed. Otherwise every empty table
+  would pop an error dialog.
 - **Unsupported operations throw `SQLFeatureNotSupportedException`**, never
   `UnsupportedOperationException`. A JDBC caller catches `SQLException`; an unchecked throw
   from a driver takes the host application down with it.
@@ -134,9 +135,11 @@ that is what a JDBC caller is written against.
 - **Transactions** are the MOCA `commit` / `rollback` commands, driven by
   `setAutoCommit(false)`. Closing a connection with an open transaction rolls it back, and
   closes the statements that connection handed out.
-- **`?` parameters are inlined client-side.** MOCA has no bind-parameter protocol — a command
-  is just a string — so `PreparedStatement` renders parameters into MOCA literal syntax
-  before sending. Strings are single-quoted with embedded quotes doubled. See the security
+- **`?` parameters are resolved client-side.** MOCA has no bind-parameter protocol — a
+  command is just a string — so `PreparedStatement` renders parameters into MOCA literal
+  syntax before sending. Strings are single-quoted with embedded quotes doubled. In SQL
+  passed through to the database they are published as MOCA variables instead; see
+  [Parameters in passed-through SQL](#parameters-in-passed-through-sql) and the security
   note below.
 
 ## Catalog browsing
@@ -189,14 +192,57 @@ runs on:
 [select * from poldat]
 ```
 
-A JDBC tool does not know that, so the driver **wraps a bare `SELECT` in brackets for you**.
+A JDBC tool does not know that, so the driver **wraps bare SQL in brackets for you**.
 `select * from poldat` is sent as `[select * from poldat]`, which is what makes
 double-clicking a table in DBeaver's navigator work. A trailing semicolon is dropped.
 
-Only a command that starts with the word `select` is touched, and only when it is not
-already bracketed — every MOCA command starts with a verb (`list`, `publish`, `get`, ...),
-so there is nothing for this to collide with. `Connection.nativeSQL()` reports the same
-transformation.
+`insert into`, `update … set` and `delete from` are wrapped the same way. That is the SQL
+DBeaver generates when you save changes to a grid, so adding, duplicating, editing and
+deleting rows work too.
+
+The match is deliberately narrow, so that a MOCA command is never mistaken for SQL:
+
+- `select` is enough on its own, because no MOCA command starts with it.
+- The DML verbs must appear in their SQL shape, because a site's own commands can be named
+  `update …` or `delete …`. `update poldat set …` is wrapped; `update inventory status
+  where …` is not.
+- Nothing already bracketed is touched.
+
+`Connection.nativeSQL()` reports the same transformation.
+
+### Parameters in passed-through SQL
+
+A `PreparedStatement` whose SQL is passed through does not splice its parameters into the
+brackets. It publishes them as MOCA variables and refers to them by name:
+
+```
+publish data where moca_jdbc_1 = 'ORDLIN' and moca_jdbc_2 = 'ALLOCATE-INV'
+  | [update poldat set polval = @moca_jdbc_1 where polcod = @moca_jdbc_2]
+```
+
+MOCA scans bracketed SQL for its own syntax on the way through, and ordinary data contains
+that syntax — `abs(invsum.untqty - @pckqty) asc` is a normal value in `poldat`. Published
+first, a value is only ever a quoted MOCA literal, and MOCA binds each `@moca_jdbc_n` on the
+database as a real bind variable, so it never becomes SQL text.
+
+Three kinds of value are written differently:
+
+| Value | In the SQL |
+|---|---|
+| `null` | the SQL keyword `null` — there is nothing to bind |
+| date, time, timestamp | `to_date(@moca_jdbc_n, 'YYYYMMDDHH24MISS')`, since MOCA carries it as a string |
+| boolean | bound as `1` or `0` |
+
+A statement that mixes SQL and MOCA — `[select …] | publish data …` — is a MOCA command, and
+its parameters are inlined as MOCA literals like any other.
+
+### Editing table data in DBeaver
+
+- **DBeaver needs a unique key** to update or delete a row. The primary key comes from
+  `list table indexes`; for a table without one, DBeaver asks which columns identify a row.
+- **Saves report 0 rows updated.** MOCA does not return an affected-row count, so the driver
+  has nothing honest to report but zero. It is not a sign the save failed — a failure is
+  reported as an error.
 
 ## Security
 
@@ -213,6 +259,11 @@ The escaping in `MocaPreparedStatement.quote` is therefore security-relevant, no
 is the only thing between an untrusted value and executable command text. Strings are wrapped
 in single quotes with embedded quotes doubled, which is MOCA's own escape, and this is covered
 by a test that attempts an injection.
+
+SQL passed through to the database is better off, but not by as much as it looks. The value
+reaches the database as a bind variable, so it cannot become SQL text — but it still travels in
+a `publish data` clause as a MOCA literal, so that same escaping is still what stops it
+becoming MOCA command text.
 
 That said, escaping is a weaker guarantee than real parameter binding. **Do not build MOCA
 commands from untrusted input** if you can avoid it.

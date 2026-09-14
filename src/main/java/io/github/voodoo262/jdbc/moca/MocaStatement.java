@@ -9,6 +9,7 @@ import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.regex.Pattern;
 
 /**
  * Executes MOCA commands.
@@ -20,6 +21,19 @@ import java.time.Duration;
  */
 class MocaStatement implements Statement
 {
+    /**
+     * What {@link #bracketBareSql} treats as SQL rather than a MOCA command.
+     *
+     * <p>{@code select} is enough on its own: no MOCA command starts with it. The DML verbs
+     * have to appear in their SQL shape &mdash; {@code insert into}, {@code delete from},
+     * {@code update <table> set} &mdash; because a site's own commands can be named
+     * {@code update ...} or {@code delete ...}. {@code update} allows one alias between the
+     * table and {@code set}.
+     */
+    private static final Pattern BARE_SQL = Pattern.compile(
+            "(?:select|insert\\s+into|delete\\s+from|update\\s+\\S+(?:\\s+\\S+)?\\s+set)\\s",
+            Pattern.CASE_INSENSITIVE);
+
     private final MocaConnection connection;
 
     private MocaResultSet resultSet;
@@ -90,7 +104,7 @@ class MocaStatement implements Statement
 
         final Duration timeout = queryTimeoutSeconds > 0 ? Duration.ofSeconds(queryTimeoutSeconds) : null;
         final MocaRows rows = connection.getClient()
-                .execute(bracketBareSelect(sql), connection.getAutoCommit(), timeout)
+                .execute(bracketBareSql(sql), connection.getAutoCommit(), timeout)
                 .limit(maxRows);
         connection.noteExecuted();
 
@@ -247,22 +261,21 @@ class MocaStatement implements Statement
     // -------------------------------------------------------------- internals
 
     /**
-     * Wraps a bare {@code SELECT} in MOCA's native-SQL brackets.
+     * Wraps bare SQL in MOCA's native-SQL brackets.
      *
      * <p>MOCA is not SQL, but it will pass a bracketed statement straight through to the
      * database underneath ({@code [select * from poldat]}). A JDBC tool does not know that:
-     * DBeaver's "view table data" generates a plain {@code SELECT * FROM poldat}, which
-     * MOCA rejects as an unknown command. Adding the brackets here is what makes
-     * double-clicking a table in the navigator work at all.
+     * DBeaver's "view table data" generates a plain {@code SELECT * FROM poldat}, and saving
+     * an edited grid generates plain {@code INSERT}, {@code UPDATE} and {@code DELETE}. MOCA
+     * rejects every one of them as a syntax error, so adding the brackets here is what makes
+     * browsing and editing a table work at all.
      *
-     * <p>Only a command that <em>starts</em> with {@code select} is touched, and only when
-     * it is not already bracketed. Every real MOCA command starts with a verb
-     * ({@code list}, {@code publish}, {@code get}, ...), so there is nothing for this to
-     * collide with.
+     * <p>See {@link #BARE_SQL} for exactly what counts as bare SQL. Nothing already bracketed
+     * is touched.
      *
      * @return {@code sql} unchanged, or wrapped in {@code [ ]}
      */
-    static String bracketBareSelect(final String sql)
+    static String bracketBareSql(final String sql)
     {
         if (sql == null) return null;
 
@@ -271,7 +284,7 @@ class MocaStatement implements Statement
         {
             return sql;
         }
-        if (!startsWithWord(trimmed, "select"))
+        if (!BARE_SQL.matcher(trimmed).lookingAt())
         {
             return sql;
         }
@@ -283,12 +296,38 @@ class MocaStatement implements Statement
         return "[" + body + "]";
     }
 
-    /** @return true if {@code text} begins with {@code word} followed by whitespace. */
-    private static boolean startsWithWord(final String text, final String word)
+    /**
+     * @return true if {@code command} is one bracketed SQL statement and nothing else &mdash;
+     *         no pipe into a MOCA command, no second block, and not a {@code [[ ]]} Groovy
+     *         block. A {@code ]} inside a string literal does not close the block.
+     */
+    static boolean isSingleSqlBlock(final String command)
     {
-        if (text.length() <= word.length()) return false;
-        if (!text.regionMatches(true, 0, word, 0, word.length())) return false;
-        return Character.isWhitespace(text.charAt(word.length()));
+        final String trimmed = command.trim();
+        if (trimmed.isEmpty() || trimmed.charAt(0) != '[') return false;
+        // Groovy has no @variables, so binding by name would break the script.
+        if (trimmed.startsWith("[[")) return false;
+
+        int depth = 0;
+        boolean inString = false;
+        for (int i = 0; i < trimmed.length(); i++)
+        {
+            final char c = trimmed.charAt(i);
+            if (c == '\'')
+            {
+                // A doubled quote toggles twice, which leaves the state where it should be.
+                inString = !inString;
+            }
+            else if (!inString && c == '[')
+            {
+                depth++;
+            }
+            else if (!inString && c == ']' && --depth == 0)
+            {
+                return i == trimmed.length() - 1;
+            }
+        }
+        return false;
     }
 
     /** Publishes a server-built result directly, bypassing execution. Used by {@link MocaDatabaseMetaData}. */

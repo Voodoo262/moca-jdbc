@@ -42,17 +42,30 @@ import java.util.List;
  * <p>The placeholder scanner deliberately ignores a {@code ?} that falls inside a string
  * literal, so a command like {@code publish data where a = 'why?'} has zero parameters,
  * not one.
+ *
+ * <p>SQL passed through to the database is the exception to inlining: its parameters are
+ * bound as MOCA variables instead. See {@link #renderBound()}.
  */
 final class MocaPreparedStatement extends MocaStatement implements PreparedStatement
 {
     private static final DateTimeFormatter MOCA_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
+    /** Prefix of the MOCA variables {@link #renderBound()} publishes, chosen not to collide with real ones. */
+    private static final String BIND_PREFIX = "moca_jdbc_";
+
+    /** What a parameter holds, which decides how passed-through SQL refers to it. */
+    private enum Kind { VALUE, NULL, TEMPORAL, BOOLEAN }
+
     /** Literal text around each placeholder; always {@code parameters.length + 1} long. */
     private final List<String> fragments;
     /** Rendered MOCA literals, indexed 0-based; {@code null} means "not yet set". */
     private final String[] parameters;
+    /** What each parameter holds, which decides how {@link #renderBound()} writes it. */
+    private final Kind[] kinds;
 
     private final String sql;
+    /** True when the statement is SQL passed through to the database, not a MOCA command. */
+    private final boolean passthrough;
 
     MocaPreparedStatement(final MocaConnection connection, final String sql) throws SQLException
     {
@@ -60,6 +73,8 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
         this.sql = sql;
         this.fragments = split(sql);
         this.parameters = new String[fragments.size() - 1];
+        this.kinds = new Kind[parameters.length];
+        this.passthrough = isSingleSqlBlock(bracketBareSql(sql));
     }
 
     /**
@@ -101,10 +116,9 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
         return fragments;
     }
 
-    /** @return the command with every placeholder replaced by its literal. */
+    /** @return the command, with every placeholder resolved. */
     private String render() throws SQLException
     {
-        final StringBuilder command = new StringBuilder(fragments.get(0));
         for (int i = 0; i < parameters.length; i++)
         {
             if (parameters[i] == null)
@@ -112,9 +126,78 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
                 throw new SQLException(
                         "Parameter " + (i + 1) + " of " + parameters.length + " was never set", "07001");
             }
+        }
+        return passthrough ? renderBound() : renderInline();
+    }
+
+    /** @return the command with every placeholder replaced by its MOCA literal. */
+    private String renderInline()
+    {
+        final StringBuilder command = new StringBuilder(fragments.get(0));
+        for (int i = 0; i < parameters.length; i++)
+        {
             command.append(parameters[i]).append(fragments.get(i + 1));
         }
         return command.toString();
+    }
+
+    /**
+     * Renders SQL that is passed through to the database, binding each value as a MOCA
+     * variable rather than splicing it into the brackets.
+     *
+     * <p>MOCA scans bracketed SQL for its own syntax on the way through, and ordinary data
+     * contains that syntax: {@code abs(invsum.untqty - @pckqty) asc} is a normal policy value.
+     * So the values are published first, as MOCA literals quoted by {@link #quote(String)},
+     * and the SQL refers to them by name:
+     *
+     * <pre>
+     * publish data where moca_jdbc_1 = 'ORDLIN' | [update poldat set polval = &#64;moca_jdbc_1]
+     * </pre>
+     *
+     * <p>MOCA binds each variable on the database, so the value never becomes SQL text. A
+     * {@code null} has nothing to bind and is written as the SQL keyword; a date or time is
+     * published as MOCA's {@code yyyyMMddHHmmss} string, so the SQL converts it back.
+     */
+    private String renderBound()
+    {
+        final StringBuilder sqlText = new StringBuilder(fragments.get(0));
+        final StringBuilder published = new StringBuilder();
+        for (int i = 0; i < parameters.length; i++)
+        {
+            final String name = BIND_PREFIX + (i + 1);
+            switch (kinds[i])
+            {
+                case NULL:
+                    sqlText.append("null");
+                    break;
+                case TEMPORAL:
+                    sqlText.append("to_date(@").append(name).append(", 'YYYYMMDDHH24MISS')");
+                    break;
+                default:
+                    sqlText.append('@').append(name);
+                    break;
+            }
+            sqlText.append(fragments.get(i + 1));
+
+            if (kinds[i] != Kind.NULL)
+            {
+                published.append(published.length() == 0 ? "publish data where " : " and ")
+                         .append(name).append(" = ").append(publishedLiteral(i));
+            }
+        }
+        final String block = bracketBareSql(sqlText.toString());
+        return published.length() == 0 ? block : published + " | " + block;
+    }
+
+    /** @return parameter {@code i} (0-based) as the literal to publish it with. */
+    private String publishedLiteral(final int i)
+    {
+        // Flag columns on the databases MOCA runs on are numeric, so a boolean binds as 1 or 0.
+        if (kinds[i] == Kind.BOOLEAN)
+        {
+            return "true".equals(parameters[i]) ? "1" : "0";
+        }
+        return parameters[i];
     }
 
     // ---------------------------------------------------------------- execute
@@ -176,6 +259,16 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
      */
     private void set(final int index, final String literal) throws SQLException
     {
+        set(index, literal, Kind.VALUE);
+    }
+
+    /**
+     * @param index 1-based, per JDBC
+     * @param literal already-rendered MOCA literal
+     * @param kind what the value is, for {@link #renderBound()}
+     */
+    private void set(final int index, final String literal, final Kind kind) throws SQLException
+    {
         requireOpen();
         if (index < 1 || index > parameters.length)
         {
@@ -183,6 +276,9 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
                     "Parameter index " + index + " is out of range 1.." + parameters.length, "07009");
         }
         parameters[index - 1] = literal;
+        // Every setter renders SQL NULL as the bare word, and nothing else renders to it (a
+        // string "null" is quoted), so this is the one place a null needs recognising.
+        kinds[index - 1] = "null".equals(literal) ? Kind.NULL : kind;
     }
 
     /**
@@ -198,7 +294,7 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
     @Override public void setNull(int i, int sqlType) throws SQLException { set(i, "null"); }
     @Override public void setNull(int i, int sqlType, String typeName) throws SQLException { set(i, "null"); }
 
-    @Override public void setBoolean(int i, boolean v) throws SQLException { set(i, v ? "true" : "false"); }
+    @Override public void setBoolean(int i, boolean v) throws SQLException { set(i, v ? "true" : "false", Kind.BOOLEAN); }
     @Override public void setByte(int i, byte v) throws SQLException { set(i, Byte.toString(v)); }
     @Override public void setShort(int i, short v) throws SQLException { set(i, Short.toString(v)); }
     @Override public void setInt(int i, int v) throws SQLException { set(i, Integer.toString(v)); }
@@ -221,19 +317,19 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
     @Override
     public void setDate(final int i, final Date v) throws SQLException
     {
-        set(i, v == null ? "null" : quote(v.toLocalDate().atStartOfDay().format(MOCA_TIMESTAMP)));
+        set(i, v == null ? "null" : quote(v.toLocalDate().atStartOfDay().format(MOCA_TIMESTAMP)), Kind.TEMPORAL);
     }
 
     @Override
     public void setTime(final int i, final Time v) throws SQLException
     {
-        set(i, v == null ? "null" : quote(LocalDate.EPOCH.atTime(v.toLocalTime()).format(MOCA_TIMESTAMP)));
+        set(i, v == null ? "null" : quote(LocalDate.EPOCH.atTime(v.toLocalTime()).format(MOCA_TIMESTAMP)), Kind.TEMPORAL);
     }
 
     @Override
     public void setTimestamp(final int i, final Timestamp v) throws SQLException
     {
-        set(i, v == null ? "null" : quote(v.toLocalDateTime().format(MOCA_TIMESTAMP)));
+        set(i, v == null ? "null" : quote(v.toLocalDateTime().format(MOCA_TIMESTAMP)), Kind.TEMPORAL);
     }
 
     @Override public void setDate(int i, Date v, Calendar cal) throws SQLException { setDate(i, v); }
@@ -256,8 +352,8 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
         if (v instanceof Timestamp)        { setTimestamp(i, (Timestamp) v); return; }
         if (v instanceof Date)             { setDate(i, (Date) v); return; }
         if (v instanceof Time)             { setTime(i, (Time) v); return; }
-        if (v instanceof LocalDateTime)    { set(i, quote(((LocalDateTime) v).format(MOCA_TIMESTAMP))); return; }
-        if (v instanceof LocalDate)        { set(i, quote(((LocalDate) v).atStartOfDay().format(MOCA_TIMESTAMP))); return; }
+        if (v instanceof LocalDateTime)    { set(i, quote(((LocalDateTime) v).format(MOCA_TIMESTAMP)), Kind.TEMPORAL); return; }
+        if (v instanceof LocalDate)        { set(i, quote(((LocalDate) v).atStartOfDay().format(MOCA_TIMESTAMP)), Kind.TEMPORAL); return; }
 
         throw new SQLException(
                 "Cannot bind parameter " + i + " of type " + v.getClass().getName()
@@ -272,6 +368,7 @@ final class MocaPreparedStatement extends MocaStatement implements PreparedState
     {
         requireOpen();
         java.util.Arrays.fill(parameters, null);
+        java.util.Arrays.fill(kinds, null);
     }
 
     @Override

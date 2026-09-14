@@ -65,7 +65,7 @@ public final class MocaClient implements AutoCloseable
     /**
      * Runs a MOCA command in the current session.
      *
-     * <p>A {@link MocaServerException#NO_ROWS_AFFECTED} status is <em>not</em> raised as an
+     * <p>A "no rows" status ({@link MocaServerException#isNoRows}) is <em>not</em> raised as an
      * error. MOCA treats "nothing matched" as a failure; JDBC treats it as an empty
      * {@code ResultSet}, and callers of this driver are written against JDBC. The server
      * still sends the column list in that case, so the empty result is properly typed.
@@ -99,7 +99,7 @@ public final class MocaClient implements AutoCloseable
         }
 
         final MocaResponse response = send(request, timeout != null ? timeout : readTimeout);
-        if (response.isSuccess() || response.getStatusCode() == MocaServerException.NO_ROWS_AFFECTED)
+        if (response.isSuccess() || MocaServerException.isNoRows(response.getStatusCode()))
         {
             return response.getResults();
         }
