@@ -158,9 +158,9 @@ final class MocaConnection implements Connection
     {
         requireOpen();
         // MOCA has no JDBC escape syntax to translate, so the only transformation is the
-        // one the driver really does apply: bracketing a bare SELECT so MOCA passes it
-        // through to the database underneath.
-        return MocaStatement.bracketBareSelect(sql);
+        // one the driver really does apply: bracketing bare SQL so MOCA passes it through
+        // to the database underneath.
+        return MocaStatement.bracketBareSql(sql);
     }
 
     // ----------------------------------------------------------- transactions

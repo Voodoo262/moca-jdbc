@@ -20,6 +20,11 @@ public class MocaServerException extends SQLException
     public static final int SYNTAX_ERROR = 505;
     /** No rows were affected/returned. Not an error in JDBC terms — see {@link MocaClient}. */
     public static final int NO_ROWS_AFFECTED = 510;
+    /**
+     * No rows, as MOCA's database layer reports it. MOCA code conventionally catches this
+     * together with {@link #NO_ROWS_AFFECTED}, and neither is a JDBC error.
+     */
+    public static final int DB_NO_ROWS_AFFECTED = -1403;
     /** Reference to a column that does not exist. */
     public static final int INVALID_COLUMN = 511;
 
@@ -52,11 +57,18 @@ public class MocaServerException extends SQLException
         return results;
     }
 
+    /** @return true for either of MOCA's "no rows" statuses. */
+    public static boolean isNoRows(final int statusCode)
+    {
+        return statusCode == NO_ROWS_AFFECTED || statusCode == DB_NO_ROWS_AFFECTED;
+    }
+
     private static String sqlStateFor(final int statusCode)
     {
         switch (statusCode)
         {
-            case NO_ROWS_AFFECTED:  return "02000"; // no data
+            case NO_ROWS_AFFECTED:
+            case DB_NO_ROWS_AFFECTED: return "02000"; // no data
             case SYNTAX_ERROR:      return "42601"; // syntax error
             case INVALID_COLUMN:    return "42703"; // undefined column
             case COMMAND_NOT_FOUND: return "42000"; // syntax error or access rule violation
