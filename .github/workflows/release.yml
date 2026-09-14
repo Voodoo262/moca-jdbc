@@ -30,7 +30,8 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      # The tag is attacker-influenced text, so it goes through the environment rather
+      # The tag is the version: there is no literal in build.gradle to bump first. The
+      # tag is also attacker-influenced text, so it goes through the environment rather
       # than being interpolated into the script.
       - name: Resolve the release version from the tag
         env:
@@ -40,17 +41,8 @@ jobs:
           PREFIX='v'
           echo "RELEASE_VERSION=${RELEASE_TAG#"$PREFIX"}" >> "$GITHUB_ENV"
 
-      # Without this a v1.0.1 tag would happily ship a jar stamped 1.0.0, and the
-      # mismatch would only surface in someone's DBeaver connection panel.
-      - name: Verify the tag matches the project version
-        run: |
-          set -euo pipefail
-          BUILT="$(./gradlew -q printVersion)"
-          if [ "$BUILT" != "$RELEASE_VERSION" ]; then
-            echo "::error::tag says '$RELEASE_VERSION' but build.gradle says '$BUILT'"
-            exit 1
-          fi
-
+      # -PprojectVersion stamps the tag's version onto the jar names and the manifest's
+      # Implementation-Version, which is what DBeaver's connection panel reports.
       - run: ./gradlew build -PprojectVersion="$RELEASE_VERSION"
 
       - name: Verify the artifacts are all present
