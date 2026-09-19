@@ -298,19 +298,15 @@ Java 17 or newer to run the driver; the build compiles at release level 17 on an
 The tests need no live MOCA server: they run the driver end-to-end over real HTTP against a
 fake MOCA server built on the JDK's own `HttpServer`.
 
-## Credits
+## Sponsored by
 
-Inspired by [`labelzoom-moca-client-java`](https://github.com/labelzoom/labelzoom-moca-client-java),
-which is where this started and which remains the better choice if you want a plain MOCA
-client rather than a JDBC driver.
+<a href="https://labelzoom.com">
+  <img src="docs/images/labelzoom.svg" alt="LabelZoom" width="180">
+</a>
 
-This driver is a separate implementation rather than a wrapper around it, because a JDBC
-driver needs things a general client does not: 1-based columns, `SQLException` on every
-failure path, per-statement timeouts, and no transitive dependencies to conflict with the
-host application's classpath.
-
-The two overlap in the MOCA request/response XML format, which is the shared contract — a
-change in how MOCA frames a request or response has to be applied in both places.
+Development and maintenance of **moca-jdbc** is supported by
+[LabelZoom](https://labelzoom.com), cloud labeling infrastructure
+for warehouse and logistics applications.
 
 ## License
 
